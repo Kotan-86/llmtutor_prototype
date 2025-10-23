@@ -1,0 +1,6 @@
+__pycache__
+.venv
+flask_session
+.python-version
+pyproject.toml
+uv.lock

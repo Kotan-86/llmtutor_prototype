@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLMチューター</title>
+    <style>
+        /* 簡単なスタイルを直接記述します */
+        body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        #chat-box { height: 400px; border: 1px solid #ccc; overflow-y: scroll; padding: 10px; margin-bottom: 10px; }
+        #message-form { display: flex; }
+        #message-input { flex-grow: 1; padding: 10px; }
+        button { padding: 10px; }
+        .user-message { text-align: right; color: blue; }
+        .bot-message { text-align: left; color: green; }
+    </style>
+</head>
+<body>
+    <h1>LLMチューターとの対話</h1>
+    <div id="chat-box">
+        </div>
+    <form id="message-form">
+        <input type="text" id="message-input" placeholder="メッセージを入力..." autocomplete="off">
+        <button type="submit">送信</button>
+    </form>
+
+    <script>
+        // HTML要素を取得します
+        const chatBox = document.getElementById('chat-box');
+        const messageForm = document.getElementById('message-form');
+        const messageInput = document.getElementById('message-input');
+
+        // フォームが送信されたときの処理を定義します
+        messageForm.addEventListener('submit', async function(event) {
+            // ページの再読み込みを防ぎます
+            event.preventDefault();
+
+            // 入力されたメッセージを取得します
+            const userMessage = messageInput.value;
+            if (!userMessage) return; // メッセージが空なら何もしません
+
+            // ユーザーのメッセージをチャットボックスに表示します
+            appendMessage(userMessage, 'user-message');
+
+            // 入力欄を空にします
+            messageInput.value = '';
+
+            try {
+                // バックエンドの'/chat'にメッセージを送信します
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ message: userMessage })
+                });
+
+                // 応答データをJSONとして解析します
+                const data = await response.json();
+                const botResponse = data.response;
+
+                // ボットの応答をチャットボックスに表示します
+                appendMessage(botResponse, 'bot-message');
+
+            } catch (error) {
+                console.error('エラー:', error);
+                appendMessage('エラーが発生しました。', 'bot-message');
+            }
+        });
+
+        // メッセージをチャットボックスに追加する関数
+        function appendMessage(message, className) {
+            const messageElement = document.createElement('div');
+            messageElement.textContent = message;
+            messageElement.className = className;
+            chatBox.appendChild(messageElement);
+            // 自動で一番下にスクロールします
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+    </script>
+</body>
+</html>
