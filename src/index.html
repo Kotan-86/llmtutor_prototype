@@ -53,14 +53,24 @@
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({ message: userMessage })
+                    
                 });
+
+                if (response.status === 401) {
+                    // サーバーから「再認証が必要」という応答が来た場合
+                    alert("セッションが切れました。再度認証してください。");
+                    window.location.href = "/"; // ページ全体をトップページにリダイレクト
+                    return;
+                }
+
+                if (!response.ok) {
+                    // その他のサーバーエラーの場合
+                    throw new Error(`サーバーエラー: ${response.status}`);
+                }
 
                 // 応答データをJSONとして解析します
                 const data = await response.json();
-                const botResponse = data.response;
-
-                // ボットの応答をチャットボックスに表示します
-                appendMessage(botResponse, 'bot-message');
+                appendMessage(data.response || data.error, 'bot-message');
 
             } catch (error) {
                 console.error('エラー:', error);

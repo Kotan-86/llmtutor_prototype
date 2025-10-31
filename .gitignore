@@ -4,3 +4,4 @@ flask_session
 .python-version
 pyproject.toml
 uv.lock
+credentials.json
