@@ -5,3 +5,5 @@ flask_session
 pyproject.toml
 uv.lock
 credentials.json
+Dockerfile
+.dockerignore

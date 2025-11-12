@@ -9,11 +9,16 @@ from vertexai.generative_models import GenerativeModel, Tool
 from tenacity import retry, stop_after_attempt, wait_exponential
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
+import gspread
+from gspread_dataframe import get_as_dataframe
 import io
 import traceback
+import httplib2
+from google_auth_httplib2 import AuthorizedHttp
 
 # SSL証明書なしのローカル環境で実行するための設定（開発時のみ）
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -24,7 +29,10 @@ LOCATION = "us-east4"
 RAG_CORPUS_PATH = (
     "projects/flash-adapter-475404-q6/locations/us-east4/ragCorpora/2227030015734710272"
 )
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]  # 定数は大文字で定義
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+]
 
 # --- ▼▼▼ Flaskアプリケーションの初期化とセッション設定 ▼▼▼ ---
 app = Flask(__name__, template_folder="src")
@@ -60,29 +68,49 @@ SYSTEM_PROMPT = """
 """
 
 
-# --- ▼▼▼ Google Drive データ取得ヘルパー関数 (修正済み) ▼▼▼ ---
-def get_drive_service():
+def get_authenticated_credentials():
+    """
+    セッションから認証情報を取得し、必要ならリフレッシュして返す。
+    失敗した場合は None を返す。
+    """
     creds = None
     if "credentials" in session:
         print("セッションから認証情報を取得しています。")
-        # ★★★ ここを'SCOPES='から'scopes='に修正しました ★★★
         try:
             creds = Credentials.from_authorized_user_info(
                 session["credentials"],
-                scopes=SCOPES,  # キーワード引数は小文字、渡す変数は大文字の定数
+                scopes=SCOPES,
             )
         except Exception as e:
             print(f"認証情報の読み込み中にエラーが発生しました: {e}")
-        print(creds)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                print(
+                    "アクセストークンの有効期限が切れているため、リフレッシュを試みます。"
+                )
+                creds.refresh(Request())
+                session["credentials"] = {
+                    "token": creds.token,
+                    "refresh_token": creds.refresh_token,
+                    "token_uri": creds.token_uri,
+                    "client_id": creds.client_id,
+                    "client_secret": creds.client_secret,
+                    "scopes": creds.scopes,
+                }
+                print("トークンのリフレッシュに成功しました。")
+            except Exception as e:
+                print(f"トークンのリフレッシュ中にエラーが発生しました: {e}")
+                return None
+        else:
+            return None
+
     if not creds or not creds.valid:
         return None
-    else:
-        print("Google Driveサービスの認証に成功しました。")
-    try:
-        return build("drive", "v3", credentials=creds)
-    except HttpError as error:
-        print(f"An error occurred: {error}")
-        return None
+
+    print("Google APIの認証に成功しました。")
+    return creds
 
 
 def download_file_from_drive(service, file_name):
@@ -107,6 +135,137 @@ def download_file_from_drive(service, file_name):
         return file_content.getvalue().decode("utf-8-sig")
     except HttpError as error:
         print(f"ファイルのダウンロード中にエラーが発生しました: {error}")
+        return None
+
+
+def get_spreadsheet_by_id_as_dataframe(creds, file_id, worksheet_name=None):
+    """
+    gspreadを使い、スプレッドシートIDで直接ファイルを開き、
+    指定されたワークシートをDataFrameとして返す。
+    """
+    try:
+        # 1. gspread でスプレッドシートを開く
+        print(f"gspread で ID: {file_id} を認証・読み込み開始...")
+        gc = gspread.authorize(creds)
+        spreadsheet = gc.open_by_key(file_id)  # ★ IDで直接開く
+        print(f"gspread で '{spreadsheet.title}' をオープン完了。")
+
+        # 2. ワークシートを選択
+        if worksheet_name:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        else:
+            worksheet = spreadsheet.get_worksheet(0)
+            print(
+                f"ワークシート名が指定されなかったため、最初のシート '{worksheet.title}' を読み込みます。"
+            )
+
+        # 3. DataFrameとして取得
+        print(f"gspread で '{worksheet.title}' をDataFrameに変換開始...")
+        df = get_as_dataframe(worksheet)
+        print(f"gspread で '{worksheet.title}' をDataFrameに変換完了。")
+
+        if df.empty:
+            # ( ... 既存のロジックと同じ ... )
+            print(f"ワークシート '{worksheet.title}' は空です。")
+            if list(df.columns):
+                return df
+            else:
+                return None
+
+        df = df.dropna(how="all")
+        print(f"ID: {file_id} の '{worksheet.title}' の読み込みに成功しました。")
+        return df
+
+    except gspread.exceptions.APIError as error:
+        print(f"gspread APIエラー (ID: {file_id}): {error}")
+        print(
+            " -> もし 'PERMISSION_DENIED' なら、Google Cloudで 'Google Sheets API' が有効か、OAuth同意画面のスコープに 'spreadsheets.readonly' があるか確認してください。"
+        )
+        return None
+    except gspread.exceptions.WorksheetNotFound:
+        print(
+            f"エラー: ワークシート '{worksheet_name}' が (ID: {file_id}) に見つかりません。"
+        )
+        return None
+    except Exception as e:
+        # ★ gspread も内部で httplib2 を使うため、ここでタイムアウトする可能性も残っています
+        print(
+            f"ID: {file_id} のスプレッドシート読み込み中に予期せぬエラーが発生しました: {e}"
+        )
+        traceback.print_exc()
+        return None
+
+
+def get_spreadsheet_as_dataframe(creds, drive_service, file_name, worksheet_name=None):
+    try:
+        # 1. Drive APIでスプレッドシートのIDを検索
+        # ★ どのファイルの検索を開始したかログに出す
+        print(f"Drive API で '{file_name}' を検索開始...")
+        query = f"name='{file_name}' and trashed=false and mimeType='application/vnd.google-apps.spreadsheet'"
+        results = (
+            drive_service.files()
+            .list(q=query, spaces="drive", fields="files(id, name)")
+            .execute()  # <-- ここでタイムアウトしている
+        )
+        # ★ 検索が完了したことをログに出す
+        print(f"Drive API で '{file_name}' を検索完了。")
+        items = results.get("files", [])
+
+        if not items:
+            print(f"スプレッドシートが見つかりません: {file_name}")
+            return None
+
+        file_id = items[0].get("id")
+
+        # 2. gspread でスプレッドシートを開く
+        # ★ gspreadでの処理開始をログに出す
+        print(f"gspread で '{file_name}' (ID: {file_id}) を認証・読み込み開始...")
+        gc = gspread.authorize(creds)
+        spreadsheet = gc.open_by_key(file_id)
+        print(f"gspread で '{file_name}' をオープン完了。")
+
+        # 3. ワークシートを選択
+        if worksheet_name:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        else:
+            worksheet = spreadsheet.get_worksheet(0)
+            print(
+                f"ワークシート名が指定されなかったため、最初のシート '{worksheet.title}' を読み込みます。"
+            )
+
+        # 4. DataFrameとして取得
+        # ★ DataFrameへの変換開始をログに出す
+        print(f"gspread で '{worksheet.title}' をDataFrameに変換開始...")
+        df = get_as_dataframe(worksheet)
+        print(f"gspread で '{worksheet.title}' をDataFrameに変換完了。")
+
+        if df.empty:
+            print(f"ワークシート '{worksheet.title}' は空です。")
+            if list(df.columns):
+                return df
+            else:
+                return None
+
+        df = df.dropna(how="all")
+
+        print(f"'{file_name}' の '{worksheet.title}' の読み込みに成功しました。")
+        return df
+
+    except HttpError as error:
+        # ★ どのファイルでエラーが出たか明記する
+        print(f"'{file_name}' のDrive API検索中にHttpErrorが発生しました: {error}")
+        return None
+    except gspread.exceptions.WorksheetNotFound:
+        print(
+            f"エラー: ワークシート '{worksheet_name}' が '{file_name}' に見つかりません。"
+        )
+        return None
+    except Exception as e:
+        # ★ どのファイルでエラーが出たか明記する
+        print(
+            f"'{file_name}' のスプレッドシート読み込み中に予期せぬエラーが発生しました: {e}"
+        )
+        traceback.print_exc()
         return None
 
 
@@ -157,25 +316,48 @@ def chat():
             return jsonify({"error": "メッセージがありません"}), 400
 
         chat_history = session.get("chat_history", [])
-        drive_service = get_drive_service()
-        if not drive_service:
-            # 認証情報が無効になっている可能性があるので、再認証を促す
+
+        creds = get_authenticated_credentials()
+        if not creds:
+            # 認証情報が無効になっている可能性
             return jsonify({"error": "authentication_required"}), 401
+
+        # Drive APIサービスも構築（スプレッドシート検索のため）
+        # try:
+        #     # 1. タイムアウトを60秒に設定した「素の」http オブジェクトを作成
+        #     http_client_base = httplib2.Http(timeout=60)
+        #     # 2. 認証情報(creds)と素のhttpオブジェクトを組み合わせて、
+        #     #    「認証済み」かつ「タイムアウト設定済み」の http オブジェクトを作成
+        #     authorized_http_client = AuthorizedHttp(creds, http_client_base)
+        #     # 3. 認証済みの http オブジェクトを使って service を構築
+        #     drive_service = build("drive", "v3", http=authorized_http_client)
+        # except HttpError as error:
+        #     print(f"Driveサービス構築中にエラー: {error}")
+        #     return jsonify({"error": "Driveサービス構築エラー"}), 500
 
         target_user_id = 343
 
-        log_file_name = f"講義動画視聴ログ_{target_user_id}_No.1 - No.1.csv"
-        log_csv_content = download_file_from_drive(drive_service, log_file_name)
+        # --- 視聴ログの取得 (IDで直接指定) ---
+        log_file_id = (
+            "1bR6rfFwXzBi-CB6Beg0AlsK8rU2UpaapEjgTi4MYFGE"  # ★ ステップB-1で取得したID
+        )
+        # (注: "シート1" の部分は、実際のワークシート名に合わせてください)
+        log_df = get_spreadsheet_by_id_as_dataframe(
+            creds, log_file_id, worksheet_name="No.1"
+        )
         lecture_log_data = (
-            pd.read_csv(io.StringIO(log_csv_content)).to_string()
-            if log_csv_content
+            log_df.to_string()
+            if log_df is not None
             else "視聴ログが見つかりませんでした。"
         )
 
-        quiz_file_name = "小テストNo.1.csv"
-        quiz_csv_content = download_file_from_drive(drive_service, quiz_file_name)
-        if quiz_csv_content:
-            quiz_df = pd.read_csv(io.StringIO(quiz_csv_content))
+        # --- 小テスト結果の取得 (IDで直接指定) ---
+        quiz_file_id = "1PKmB_IdMO3BmHVDHwHLxpqwdk1BsnHFEU-VdXpXGsqw"
+        quiz_df = get_spreadsheet_by_id_as_dataframe(
+            creds, quiz_file_id, worksheet_name="フォームの回答 1"
+        )
+        if quiz_df is not None:
+            # CSV読み込み時と同じデータ型変換と絞り込み
             quiz_df["idを入力してください"] = pd.to_numeric(
                 quiz_df["idを入力してください"], errors="coerce"
             )
@@ -183,13 +365,14 @@ def chat():
                 quiz_df["idを入力してください"] == target_user_id
             ]
             quiz_result_data = (
-                f"小テストNo.1: 総得点 {user_quiz_result['総得点'].iloc[0]}"
+                f"小テストNo.1: 総得点 {user_quiz_result['スコア'].iloc[0]}"
                 if not user_quiz_result.empty
                 else "テスト結果が見つかりませんでした。"
             )
         else:
             quiz_result_data = "テスト結果ファイルが見つかりませんでした。"
 
+        # --- 以降のAI呼び出しロジックは変更なし ---
         prompt = SYSTEM_PROMPT.format(
             history="\n".join(chat_history),
             user_message=user_message,
