@@ -7,3 +7,4 @@ uv.lock
 credentials.json
 Dockerfile
 .dockerignore
+service_account.json

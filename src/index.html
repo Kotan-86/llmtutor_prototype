@@ -29,6 +29,52 @@
         const chatBox = document.getElementById('chat-box');
         const messageForm = document.getElementById('message-form');
         const messageInput = document.getElementById('message-input');
+        
+        // --- ▼▼▼ 削除 (Session ID 関連) ▼▼▼ ---
+        // let sessionId = null;
+        
+        // function getSessionId() {
+        //     let id = localStorage.getItem('llmtutor_session_id');
+        //     if (!id) {
+        //         id = `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+        //         localStorage.setItem('llmtutor_session_id', id);
+        //         console.log('新しいセッションIDを生成:', id);
+        //     } else {
+        //         console.log('既存のセッションID:', id);
+        //     }
+        //     return id;
+        // }
+        
+        // async function loadHistory(id) {
+        //     console.log('サーバーから履歴を読み込みます...');
+        //     try {
+        //         const response = await fetch('/get_history', {
+        //             method: 'POST',
+        //             headers: { 'Content-Type': 'application/json' },
+        //             body: JSON.stringify({ session_id: id })
+        //         });
+        //
+        //         if (!response.ok) {
+        //             throw new Error(`履歴の読み込みに失敗: ${response.status}`);
+        //         }
+        //
+        //         const data = await response.json();
+        //         if (data.history && data.history.length > 0) {
+        //             console.log(`${data.history.length} 件の履歴を読み込みました。`);
+        //             data.history.forEach(item => {
+        //                 const className = (item.author === 'user') ? 'user-message' : 'bot-message';
+        //                 appendMessage(item.message, className);
+        //             });
+        //         } else {
+        //             console.log('表示する履歴はありません。');
+        //         }
+        //     } catch (error) {
+        //         console.error('履歴読み込みエラー:', error);
+        //         appendMessage('履歴の読み込みに失敗しました。', 'bot-message');
+        //     }
+        // }
+        // --- ▲▲▲ 削除ここまで ▲▲▲ ---
+
 
         // フォームが送信されたときの処理を定義します
         messageForm.addEventListener('submit', async function(event) {
@@ -46,35 +92,43 @@
             messageInput.value = '';
 
             try {
-                // バックエンドの'/chat'にメッセージを送信します
+                // バックエンドの'/chat'にメッセージのみ送信します
                 const response = await fetch('/chat', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ message: userMessage })
+                    body: JSON.stringify({ 
+                        message: userMessage
+                        // session_id: sessionId // <-- 削除
+                    })
                     
                 });
 
                 if (response.status === 401) {
-                    // サーバーから「再認証が必要」という応答が来た場合
-                    alert("セッションが切れました。再度認証してください。");
-                    window.location.href = "/"; // ページ全体をトップページにリダイレクト
+                    // (旧ロジック)
+                    alert("認証エラーが発生しました。");
                     return;
                 }
 
                 if (!response.ok) {
                     // その他のサーバーエラーの場合
-                    throw new Error(`サーバーエラー: ${response.status}`);
+                    const errorData = await response.json();
+                    throw new Error(`サーバーエラー: ${errorData.error || response.status}`);
                 }
 
                 // 応答データをJSONとして解析します
                 const data = await response.json();
-                appendMessage(data.response || data.error, 'bot-message');
+                
+                if (data.response) {
+                    appendMessage(data.response, 'bot-message');
+                } else if (data.error) {
+                    appendMessage(`エラー: ${data.error}`, 'bot-message');
+                }
 
             } catch (error) {
                 console.error('エラー:', error);
-                appendMessage('エラーが発生しました。', 'bot-message');
+                appendMessage(`エラーが発生しました: ${error.message}`, 'bot-message');
             }
         });
 
@@ -87,6 +141,13 @@
             // 自動で一番下にスクロールします
             chatBox.scrollTop = chatBox.scrollHeight;
         }
+
+        // --- ▼▼▼ 削除 (ページ読み込み時の処理) ▼▼▼ ---
+        // document.addEventListener('DOMContentLoaded', (event) => {
+        //     sessionId = getSessionId();
+        //     loadHistory(sessionId);
+        // });
+        // --- ▲▲▲ 削除ここまで ▲▲▲ ---
     </script>
 </body>
 </html>
