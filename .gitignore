@@ -8,3 +8,4 @@ credentials.json
 Dockerfile
 .dockerignore
 service_account.json
+.gcloudignore
