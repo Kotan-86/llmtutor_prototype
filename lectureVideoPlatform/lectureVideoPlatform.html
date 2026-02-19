@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="ja">
+    <head>
+      <base target="_top">
+      <style>
+        /* CSS: プレイヤーへのクリックを許可 */
+        #player{
+          pointer-events: auto;
+        }
+      </style>
+    </head>
+    <body>
+      <h3>watchingVideoPlatform</h3>
+      <div id="player"></div>
+      <div id="time">0:00:00</div>
+      <input type="range" id="seekbar" min="0" max="100" value="0">
+      <br>
+      <button id="play_button" onclick="play()">再生</button>
+      <button id="pause_button" onclick="pause()">一時停止</button>
+      <button id="forward_skip_button" onclick="forwardSkip()">先送りスキップ</button>
+      <button id="backward_skip_button" onclick="backwardSkip()">巻き戻しスキップ</button>
+      <p>最初にこのページをリロードしてください。リロードしないまま始めると正常に動画再生ができない場合があります</p>
+      <p>※リロード後、最初にロード(画面中央に丸が回り続ける)が続きます。しかし、再生ボタンを押せば正常に再生できます。</p>
+      <a href="https://forms.gle/imt5HxuzNHnJkeW26" target="_blank">小テストに進む</a>
+
+      <script>
+        // IFrame Player API を非同期的に取得する
+        var tag = document.createElement('script');
+        tag.src = "https://www.youtube.com/iframe_api";
+        var firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+        // 変数定義
+        var player;
+        var timer = null;
+        const participant_id = 1;
+        var currentTime = 0;
+        
+        // ★状態判定用フラグ
+        var isSkipping = false; // ボタンでのスキップ用（Playログ抑制）
+        var isSeeking = false;  // シークバーでの移動用（Playログ抑制）
+        var isDragging = false; // ★追加：シークバー操作中（Pauseログ抑制）
+
+        // IPA取得後に動画を生成する
+        function onYouTubeIframeAPIReady() {
+          player = new YT.Player('player', {
+          height: (1200 * 9 / 16),
+          width: 1200,
+          playerVars: {
+              cc_load_policy: 1,
+              controls: 0,
+              disablekb: 1,
+              iv_load_policy: 3,
+              modestbranding: 1,
+              rel: 0,
+              enablejsapi: 1
+          },
+          events: {
+            'onReady': onPlayerReady,
+            'onStateChange': onPlayerStateChange
+          },
+          videoId: 'ZXuZHNjS2tA'});
+        }
+
+        // 画面サイズ関係
+        function getWindowSize() {
+          var w = window.innerWidth || document.documentElement.clientWidth || document.body.clientWidth;
+          var h = window.innerHeight || document.documentElement.clientHeight || document.body.clientHeight;
+          return {width: w, height: h};
+        }
+
+        function setPlayerSize(player) {
+          var windowSize = getWindowSize();
+          var playerWidth = windowSize.width * 0.5;
+          var playerHeight = playerWidth * 9 / 16;
+          player.setSize(playerWidth, playerHeight);
+          seekBar();
+        }
+
+        window.addEventListener('resize', function() {
+          setPlayerSize(player);
+          seekBar();
+        });
+
+        function onPlayerReady(event) {
+          range.max = player.getDuration();
+          event.target.playVideo();
+          setPlayerSize(player);
+          player.pauseVideo();
+        }
+
+        // シークバー関係
+        function seekBar() {
+          range = document.getElementById('seekbar');
+          var prevTime;
+          pw = document.getElementById('player').offsetWidth;
+          range.style.width = pw + "px";
+          range.addEventListener('change', function() {
+            // ★操作終了：フラグを戻す
+            isDragging = false; 
+            
+            seekbar_grabbed = true;
+            timevalue = document.getElementById('time');
+            sessionStorage.removeItem("currenttime");
+            document.querySelector('#time').innerHTML = formattime(range.value);
+            if(prevTime < range.value){
+              forwardSeek((range.value - prevTime), prevTime, range.value);
+            }else if(prevTime > range.value){
+              backwardSeek((range.value - prevTime), prevTime, range.value);
+            }
+          });
+          range.addEventListener('input', function() {
+            if (sessionStorage.getItem("currenttime") === null) {
+              // ★操作開始：Pauseログを抑制するためにフラグを立てる
+              isDragging = true; 
+
+              prevTime = player.getCurrentTime();
+              sessionStorage.setItem("currenttime", range.value);
+              player.pauseVideo();
+              if(timer) clearInterval(timer);
+            }
+          });
+        }
+
+        function syncSeekBar() {
+          if (player && typeof player.getCurrentTime === 'function') {
+            var currentTime = player.getCurrentTime();
+            seekbar_jumpto(currentTime);
+          } 
+        }
+
+        function seekbar_jumpto(value) {
+          range.value = value;
+          timevalue = document.getElementById('time');
+          timevalue.innerHTML = formattime(range.value);
+        }
+
+        function formattime(seconds) {
+          var strTime = Math.floor(Number(seconds) / 3600) + ":";
+          strTime += (('00') + Math.floor(Number(seconds) / 60)).slice(-2) + ":";
+          strTime += (('00') + Number(seconds) % 60).slice('-2');
+          return strTime;
+        }
+
+        // ★修正点：フラグを見てplay/pauseログを制御
+        function onPlayerStateChange(event) {
+          var currentTime = player.getCurrentTime();
+          
+          if (event.data == YT.PlayerState.PLAYING) {
+            // 再生開始時
+            if(timer) clearInterval(timer);
+            timer = setInterval(syncSeekBar, 500); 
+            if (player.getDuration()) {
+                range.max = player.getDuration();
+            }
+
+            // スキップまたはシーク直後なら、playログを記録せずにフラグを戻す
+            if (isSkipping) {
+                isSkipping = false;
+            } else if (isSeeking) {
+                isSeeking = false;
+            } else {
+                // 通常の再生時のみ記録
+                google.script.run.recordLog(participant_id, currentTime, 'play', 0);
+            }
+
+          } else if (event.data == YT.PlayerState.PAUSED) {
+            // 一時停止時
+            if(timer) clearInterval(timer);
+            
+            // ★シークバー操作中（ドラッグ中）なら、pauseログは記録しない
+            if (isDragging) {
+                return;
+            }
+            // 通常の一時停止のみ記録
+            google.script.run.recordLog(participant_id, currentTime, 'pause', 0);
+
+          } else {
+            // その他
+            if(timer) clearInterval(timer);
+          }
+        }
+
+        // ボタン用関数
+        function play(){
+          player.playVideo();
+        }
+
+        function pause(){
+          player.pauseVideo();
+        }
+
+        // スキップ機能
+        // 修正版：基準時間をシークバーの値(range.value)から取得するように変更
+        function forwardSkip(){
+          isSkipping = true; 
+          
+          const toSkipTime = 5;
+          // 変更点: player.getCurrentTime() ではなく、シークバーの現在値を基準にする
+          let currentBarValue = Number(document.getElementById('seekbar').value);
+          let destTime = currentBarValue + toSkipTime;
+
+          // 動画の長さを超えないように制限
+          let duration = player.getDuration();
+          if (destTime > duration) {
+            destTime = duration;
+          }
+
+          player.seekTo(destTime, true);
+          seekbar_jumpto(destTime);
+          
+          currentTime = destTime;
+          google.script.run.recordLog(participant_id, currentTime, 'forward_skip', 5);
+        }
+
+        function backwardSkip(){
+          isSkipping = true;
+
+          const toSkipTime = -5;
+          // 変更点: player.getCurrentTime() ではなく、シークバーの現在値を基準にする
+          let currentBarValue = Number(document.getElementById('seekbar').value);
+          let destTime = currentBarValue + toSkipTime;
+
+          // 0秒未満にならないように制限
+          if (destTime < 0) {
+            destTime = 0;
+          }
+
+          player.seekTo(destTime, true);
+          seekbar_jumpto(destTime);
+          
+          currentTime = destTime;
+          google.script.run.recordLog(participant_id, currentTime, 'backward_skip', -5);
+        }
+
+        // シーク機能
+        function forwardSeek(duration, prevTime, toSeekTime){
+          isSeeking = true; // 次のplayログを無視
+
+          player.seekTo(toSeekTime, true);
+          seekbar_jumpto(toSeekTime);
+          player.playVideo();
+          
+          currentTime = prevTime + duration;
+          google.script.run.recordLog(participant_id, currentTime, 'forward_seek', duration);
+        }
+
+        function backwardSeek(duration, prevTime, toSeekTime){
+          isSeeking = true; // 次のplayログを無視
+
+          player.seekTo(toSeekTime, true);
+          seekbar_jumpto(toSeekTime);
+          player.playVideo();
+          
+          currentTime = prevTime + duration;
+          google.script.run.recordLog(participant_id, currentTime, 'backward_seek', duration);
+        }
+      </script>
+    </body>
+</html>
