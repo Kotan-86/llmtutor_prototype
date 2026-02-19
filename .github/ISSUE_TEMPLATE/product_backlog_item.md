@@ -2,7 +2,6 @@
 name: Product backlog item
 description: 1人日単位のプロダクトバックログ用テンプレート
 title: "[PBL] "
-labels: ["product-backlog"]
 assignees: []
 ---
 
